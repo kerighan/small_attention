@@ -239,6 +239,128 @@ class SmallAttention(layers.Layer):
         return {"SmallAttention": SmallAttention}
 
 
+class SmallDecoder(layers.Layer):
+    def __init__(
+        self, num_heads, intermediate_dim=None, activation="relu",
+        name=None, **kwargs
+    ):
+        super().__init__(name=name, **kwargs)
+        self.num_heads = num_heads
+        self.intermediate_dim = intermediate_dim
+        self.activation = activations.get(activation)
+        self._built = False
+        self.supports_masking = True
+
+    def _build(self, input_shape, vector_shape):
+        vector_dim = vector_shape[-1]
+
+        seq_len, in_dim = input_shape[-2:]
+        self.seq_len = seq_len
+        self.in_dim = in_dim
+        if self.intermediate_dim is None:
+            self.intermediate_dim = in_dim // self.num_heads
+        self.final_dim = self.num_heads * self.intermediate_dim
+
+        # attention mechanism
+        self.attention_weights = self.add_weight(
+            name="attention_weights", shape=(in_dim, self.num_heads),
+            initializer="glorot_normal")
+        self.temperature = self.add_weight(
+            shape=(1, 1, self.num_heads),
+            initializer="ones", name="temperature")
+        self.values = self.add_weight(
+            shape=(in_dim, self.num_heads, self.intermediate_dim),
+            initializer="glorot_normal", name="values")
+        self.operator = self.add_weight(
+            name="operator", shape=(self.final_dim, in_dim),
+            initializer="glorot_normal")
+
+        # feed forward layers
+        self.feedforward_1 = self.add_weight(
+            name="feedforward_1", shape=(2 * in_dim, in_dim),
+            initializer="glorot_uniform")
+        self.feedforward_1_bias = self.add_weight(
+            name="feedforward_1_bias", shape=(1, 1, in_dim),
+            initializer="zeros")
+        self.feedforward_2 = self.add_weight(
+            name="feedforward_2", shape=(in_dim, in_dim),
+            initializer="glorot_uniform")
+        self.feedforward_2_bias = self.add_weight(
+            name="feedforward_2_bias",
+            shape=(1, 1, in_dim), initializer="zeros")
+
+        self.causal_mask = np.tril(
+            np.ones((self.seq_len, self.seq_len))
+        )[None, :, :, None].astype(np.float32)
+
+        self.layer_norm = layers.LayerNormalization(epsilon=1e-6, axis=-1)
+        self._built = True
+
+    def call(self, inputs, vector, mask=None):
+        if not self._built:
+            self._build(inputs.shape, vector.shape)
+
+        # compute attention weights
+        att_weights = tf.matmul(inputs, self.attention_weights)
+        att_weights -= tf.math.reduce_max(att_weights, axis=-2, keepdims=True)
+        att_weights *= self.temperature
+        att_weights = tf.exp(att_weights)
+        if mask is not None:
+            mask = tf.expand_dims(tf.cast(mask, tf.float32), axis=-1)
+            att_weights *= mask
+        att_weights = tf.repeat(
+            att_weights[:, :, None, :], repeats=self.seq_len, axis=2)
+        att_weights *= self.causal_mask
+        att_weights /= (
+            tf.reduce_sum(att_weights, axis=-2, keepdims=True) + 1e-30)
+        att_weights = tf.expand_dims(att_weights, -1)
+
+        values = tf.einsum("bsi,ijk->bsjk", inputs, self.values)[:, None]
+        values *= att_weights
+        values = tf.reduce_sum(values, axis=2, keepdims=False)
+        values = tf.reshape(values, [-1, self.seq_len, self.final_dim])
+        operator = tf.matmul(values, self.operator)
+
+        if len(vector.shape) == 3:
+            vector = tf.reduce_mean(vector, axis=1, keepdims=True)
+        else:
+            vector = vector[:, None, :]
+        operator += vector
+        concat = tf.concat([inputs, operator], axis=-1)
+
+        # feedforward 1
+        res = tf.matmul(concat, self.feedforward_1)
+        res = self.activation(res + self.feedforward_1_bias)
+
+        # feedforward 2
+        res = tf.matmul(res, self.feedforward_2)
+        res = res + self.feedforward_2_bias
+
+        res += inputs  # residual connection
+        res = self.layer_norm(res)  # layer normalization
+        return res
+
+    def compute_mask(self, _, mask=None):
+        return mask
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "num_heads": self.num_heads,
+            "intermediate_dim": self.intermediate_dim,
+            "activation": activations.serialize(self.activation)
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+    @staticmethod
+    def get_custom_objects():
+        return {"SmallDecoder": SmallDecoder}
+
+
 class SmallPooling(layers.Layer):
     def __init__(
         self, num_heads, out_dim=None,
@@ -283,7 +405,8 @@ class SmallPooling(layers.Layer):
             mask = tf.expand_dims(tf.cast(mask, tf.float32), axis=-1)
             att_weights *= mask
 
-        att_weights /= tf.reduce_sum(att_weights, axis=-2, keepdims=True)
+        att_weights /= (
+            tf.reduce_sum(att_weights, axis=-2, keepdims=True) + 1e-30)
         att_weights = tf.expand_dims(att_weights, -1)
 
         values = tf.einsum("bsi,ijk->bsjk", inputs, self.values)
