@@ -216,6 +216,9 @@ class SmallAttention(layers.Layer):
 
         res += inputs  # residual connection
         res = self.layer_norm(res)  # layer normalization
+
+        if mask is not None:
+            res *= mask
         return res
 
     def compute_mask(self, _, mask=None):
@@ -272,12 +275,12 @@ class SmallDecoder(layers.Layer):
             shape=(in_dim, self.num_heads, self.intermediate_dim),
             initializer="glorot_normal", name="values")
         self.operator = self.add_weight(
-            name="operator", shape=(self.final_dim, in_dim),
+            name="operator", shape=(self.final_dim, vector_dim),
             initializer="glorot_normal")
 
         # feed forward layers
         self.feedforward_1 = self.add_weight(
-            name="feedforward_1", shape=(2 * in_dim, in_dim),
+            name="feedforward_1", shape=(vector_dim + in_dim, in_dim),
             initializer="glorot_uniform")
         self.feedforward_1_bias = self.add_weight(
             name="feedforward_1_bias", shape=(1, 1, in_dim),
