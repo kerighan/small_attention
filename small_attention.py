@@ -69,7 +69,6 @@ class PositionalEmbedding(layers.Layer):
 class PositionalEncoding(layers.Layer):
     def __init__(self, positional_activation=None, **kwargs):
         super(PositionalEncoding, self).__init__(**kwargs)
-        
         self.positional_activation = activations.get(positional_activation)
 
     def build(self, input_shape):
@@ -79,7 +78,8 @@ class PositionalEncoding(layers.Layer):
 
     def call(self, inputs, mask=None):
         input_length = tf.shape(inputs)[1]
-        position_indices = tf.range(input_length, dtype=tf.int32)[tf.newaxis, :]
+        position_indices = tf.range(
+            input_length, dtype=tf.int32)[tf.newaxis, :]
         position_embeddings = self.embedding(position_indices)
         if mask is not None:
             print(mask)
